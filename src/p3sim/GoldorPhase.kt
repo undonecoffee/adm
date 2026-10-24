@@ -35,7 +35,7 @@ import net.minecraft.world.phys.Vec3
  *    reached the core). Since Hypixel's boss update; both were 82 before it.
  * [from] 1-4 starts at that section (the earlier ones done), 5 at the core opening.
  */
-class GoldorPhase(val from: Int, val arrived: Boolean = false) : Fight.Phase("P3") {
+class GoldorPhase(val from: Int, val arrived: Boolean = false, private val p3HotbarReady: Boolean = false) : Fight.Phase("P3") {
     override val restart get() = when (from) { 2 -> Fight.Start.S2; 3 -> Fight.Start.S3; 4 -> Fight.Start.S4; 5 -> Fight.Start.CORE; else -> Fight.Start.P3 }
 
     val stations = Station.all()
@@ -150,9 +150,8 @@ class GoldorPhase(val from: Int, val arrived: Boolean = false) : Fight.Phase("P3
                     SimItems.giveHotbar(player, p3 = true)
                     if (practice && Sim.isHost(player)) Practice.holdStartItem(player)
                 }
-            } else {
-                // From Storm: the Superboom onto the bar where the Hyperion was (a swap: with a saved
-                // layout slot 1 holds something else, and after StormEnd the P3 bar is already given).
+            } else if (!p3HotbarReady) {
+                // The normal P2 handoff starts with the P1/P2 layout; Restart P3 already applied its P3 layout.
                 val inv = player.inventory
                 val hype = (0..8).firstOrNull { SimItems.idOf(inv.getItem(it)) == "HYPERION" }
                 val boom = (9 until inv.containerSize).firstOrNull { SimItems.idOf(inv.getItem(it)) == "SUPERBOOM_TNT" }

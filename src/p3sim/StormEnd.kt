@@ -53,7 +53,7 @@ class StormEnd : Fight.Phase("Storm end") {
             4 -> BossBar.progress(0f)
             SON -> StormFx.line(body, "At least my son died by your hands.")
             // LEAD_IN early: the first lever credit can land 1-2 ticks before "Who dares"; the line itself still lands at LEAD.
-            LEAD - GoldorPhase.LEAD_IN -> Fight.begin(GoldorPhase(1, arrived = true))
+            LEAD - GoldorPhase.LEAD_IN -> Fight.begin(GoldorPhase(1, arrived = true, p3HotbarReady = true))
         }
     }
 
