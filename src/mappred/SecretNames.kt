@@ -4,15 +4,17 @@ package com.engineerclient.mappred
  * Names for the rooms nobody has named yet, from the dungeon's secret total: every name comes up at most
  * once a map ([MapStats.NAMES]), so the unnamed rooms take different names from their pools, and their
  * secrets have to add up to what the named rooms leave of the total ([targets]: each total the tab list
- * allows, less the named rooms' secrets).
+ * allows, less the named rooms' secrets). [missing]: names the floor never has ([FloorRules.missingNames]).
  */
-class SecretNames(used: Set<String>, private val targets: IntArray) {
+class SecretNames(used: Set<String>, private val targets: IntArray, missing: Set<String> = emptySet()) {
     /** Names still free in each pool. */
-    val avail: Array<List<RoomName>> = Array(MapStats.POOLS) { p -> MapStats.NAMES.filter { it.pool == p && it.name !in used } }
+    val avail: Array<List<RoomName>> = Array(MapStats.POOLS) { p -> MapStats.NAMES.filter { it.pool == p && it.name !in used && it.name !in missing } }
     private val poolWeight = DoubleArray(MapStats.POOLS) { p -> avail[p].sumOf { it.seen.toDouble() } }
     private val minSec = IntArray(MapStats.POOLS) { p -> avail[p].minOfOrNull { it.secrets } ?: 0 }
     private val maxSec = IntArray(MapStats.POOLS) { p -> avail[p].maxOfOrNull { it.secrets } ?: 0 }
-    private val cache = HashMap<String, Result?>()
+    /** [solve]'s answers by pools; several threads of one session ([PredictionSession]) share them. */
+    private class Box(val result: Result?)
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Box>()
     private val minT = targets.minOrNull() ?: 0
     private val maxT = targets.maxOrNull() ?: -1
 
@@ -27,10 +29,9 @@ class SecretNames(used: Set<String>, private val targets: IntArray) {
         if (pools.size > MAX_ROOMS || targets.isEmpty()) return null
         val sorted = pools.sortedArray()
         val key = sorted.joinToString(",")
-        if (key in cache) return cache[key]
+        cache[key]?.let { return it.result }
         val res = try { enumerate(sorted) } catch (_: TooMany) { null }
-        cache[key] = res
-        return res
+        return cache.getOrPut(key) { Box(res) }.result
     }
 
     private object TooMany : RuntimeException() { private fun readResolve(): Any = TooMany }

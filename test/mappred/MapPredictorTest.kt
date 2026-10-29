@@ -8,12 +8,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Synthetic 6x6 maps (tile = z * 6 + x), built by hand. */
+/** Synthetic 6x6 maps (tile = z * 6 + x, as Odin's on every floor), built by hand. */
 class MapPredictorTest {
 
     /** [rooms] discovered (kind, tiles), [doors] (a, b, kind) between tiles; every other edge by a discovered tile is a wall. */
-    private fun map(rooms: List<Pair<Kind, IntArray>>, doors: List<Triple<Int, Int, Byte>>, puzzles: Int = 3): MapView {
-        val v = MapView(6, 6, puzzles)
+    private fun map(rooms: List<Pair<Kind, IntArray>>, doors: List<Triple<Int, Int, Byte>>, puzzles: Int = 3, rules: FloorRules = FloorRules.F7): MapView {
+        val v = MapView(6, 6, puzzles, rules)
         for ((k, t) in rooms) assertNotNull(v.addRoom(k, t))
         val byPair = doors.associate { (a, b, k) -> (minOf(a, b) to maxOf(a, b)) to k }
         v.closeEdges { a, b -> byPair[minOf(a, b) to maxOf(a, b)] }
@@ -21,18 +21,36 @@ class MapPredictorTest {
     }
 
     /** Entrance at (1,0), a 2x2 behind it with a wither door down from (2,2) to (2,3), normal doors east and west. */
-    private fun opening() = map(
+    private fun opening(puzzles: Int = 3, rules: FloorRules = FloorRules.F7) = map(
         listOf(Kind.ENTRANCE to intArrayOf(1), Kind.NORMAL to intArrayOf(7, 8, 13, 14)),
         listOf(Triple(1, 7, Edge.DOOR), Triple(14, 20, Edge.WITHER), Triple(8, 9, Edge.DOOR), Triple(7, 6, Edge.DOOR)),
+        puzzles, rules,
     )
 
-    private fun predict(v: MapView, samples: Int = 400): Prediction {
-        val p = MapPredictor(v)
-        p.run(samples, 400_000, Random(42))
+    /** [v]'s prediction as the map prediction worker gets it ([drive]); F7 by the game's own steps unless [gameProcess] is false. */
+    private fun predict(v: MapView, samples: Int = 400, gameProcess: Boolean = true): Prediction {
+        val p = MapPredictor(v, gameProcess)
+        drive(p, samples, Random(42))
         return assertNotNull(p.prediction())
     }
 
-    private fun total(p: Prediction, c: Int) = p.probs.sumOf { (it?.get(c) ?: 0f).toDouble() }
+    /**
+     * As OdinMapPrediction's worker runs a predictor: a chunk at a time until [samples] are kept, or a chunk keeps none
+     * once some are (enough) or at level 3 (nothing fits). The number of chunks it took (it never spins on).
+     */
+    private fun drive(p: MapPredictor, samples: Int, rnd: Random): Int {
+        var calls = 0
+        while (p.accepted < samples) {
+            calls++
+            assertTrue(calls < 5_000, "still running after $calls chunks")
+            val kept = p.run(100, 40_000, rnd)
+            if (kept == 0 && (p.accepted > 0 || p.level > 2)) break
+        }
+        return calls
+    }
+
+    /** Over the samples themselves (the calibrated chances drawn on the map don't keep these exact). */
+    private fun total(p: Prediction, c: Int) = p.raw.sumOf { (it?.get(c) ?: 0f).toDouble() }
     private fun dist(a: Int, b: Int) = abs(a % 6 - b % 6) + abs(a / 6 - b / 6)
 
     @Test fun shapesFromTiles() {
@@ -46,6 +64,13 @@ class MapPredictorTest {
         assertNull(MapView.shapeOf(intArrayOf(0, 1, 7, 8, 9), 6))
     }
 
+    @Test fun noDoorIntoTheUnknownPredictsNothingRatherThanThrowing() {
+        // A run just started: the entrance and no door from it known yet. No tree to grow, so no samples (it read
+        // order[-1] of an empty list: "Index -1 out of bounds for length 0" in a teammate's log).
+        val p = MapPredictor(map(listOf(Kind.ENTRANCE to intArrayOf(1)), emptyList()))
+        assertEquals(0, p.run(50, 5_000, Random(42)))
+    }
+
     @Test fun everyMapHasItsSpecialRoomsOnce() {
         val p = predict(opening())
         assertEquals(0, p.level)
@@ -53,6 +78,50 @@ class MapPredictorTest {
         assertEquals(1.0, total(p, Cls.YELLOW), 1e-4)
         assertEquals(1.0, total(p, Cls.BLOOD), 1e-4)
         assertEquals(1.0, total(p, Cls.FAIRY), 1e-4)
+        assertEquals(3.0, total(p, Cls.PUZZLE), 1e-4)
+    }
+
+    @Test fun aRoomShownBeforeTheWayToItIsLeftOutUntilItJoins() {
+        // the opening, and a 1x1 at (3,3) already on the map with a door into (2,3), the tile the wither door leads
+        // into: two doors into one unknown tile from parts the map doesn't join yet - no tree, unless it's left out
+        val v = MapView(6, 6, 3, FloorRules.F7)
+        assertNotNull(v.addRoom(Kind.ENTRANCE, intArrayOf(1)))
+        assertNotNull(v.addRoom(Kind.NORMAL, intArrayOf(7, 8, 13, 14)))
+        assertNotNull(v.addRoom(Kind.NORMAL, intArrayOf(21)))
+        val doors = mapOf((1 to 7) to Edge.DOOR, (14 to 20) to Edge.WITHER, (8 to 9) to Edge.DOOR, (6 to 7) to Edge.DOOR, (20 to 21) to Edge.DOOR)
+        v.closeEdges { a, b -> doors[minOf(a, b) to maxOf(a, b)] }
+        assertEquals(0, MapPredictor(v).run(50, 20_000, Random(1)))
+        val joined = v.connectedPart()
+        assertEquals(2, joined.kinds.size)
+        assertEquals(-1, joined.roomAt[21])
+        val p = predict(joined)
+        assertEquals(0, p.level)
+        assertEquals(1.0, total(p, Cls.BLOOD), 1e-4)
+        // a map with nothing cut off is its own connected part
+        val whole = opening()
+        assertTrue(whole.connectedPart() === whole)
+    }
+
+    @Test fun theCalibrationKeepsWhatTheMapRulesOutAtNothing() {
+        // the classic sampler's (the game process's own calibration: GameSamplerTest)
+        val p = predict(opening(), gameProcess = false)
+        var changed = false
+        for (t in 0 until 36) {
+            val raw = p.raw[t] ?: continue; val q = assertNotNull(p.probs[t])
+            for (c in raw.indices) if (raw[c] == 0f) assertEquals(0f, q[c])
+            assertEquals(raw.sum(), q.sum(), 1e-4f)
+            if (raw.indices.any { abs(raw[it] - q[it]) > 1e-3f }) changed = true
+        }
+        assertTrue(changed)
+    }
+
+    @Test fun heldCellsKeepEveryMapWhole() {
+        val f7 = FloorRules.F7
+        val held = FloorRules(7, 6, 6, false, 0, true, f7.fairyBeforeBlood, f7.combos, f7.walk, f7.bloodFromEntrance,
+            f7.fairyFromEntrance, f7.bigTile, emptySet(), puzzleOrder = true, reserve = 5)
+        val p = predict(opening(rules = held))
+        assertEquals(0, p.level)
+        for (c in intArrayOf(Cls.TRAP, Cls.YELLOW, Cls.BLOOD, Cls.FAIRY)) assertEquals(1.0, total(p, c), 1e-4)
         assertEquals(3.0, total(p, Cls.PUZZLE), 1e-4)
     }
 
@@ -80,7 +149,7 @@ class MapPredictorTest {
         assertEquals(0, p.level)
         var seen = 0.0
         for (t in 0 until 36) {
-            val b = p.probs[t]?.get(Cls.BLOOD) ?: continue
+            val b = p.raw[t]?.get(Cls.BLOOD) ?: continue
             if (b <= 0f) continue
             seen += b
             assertTrue(dist(t, 26) == 2 || dist(t, 26) == 4, "blood at $t, ${dist(t, 26)} from the fairy")
@@ -139,6 +208,87 @@ class MapPredictorTest {
         assertEquals(1f, assertNotNull(p.probs[20])[Cls.BLOOD], 1e-4f)
     }
 
+    @Test fun aSmallFloorStaysInItsGrid() {
+        // F1: a 4x5 grid, no trap room
+        val p = predict(opening(2, FloorRules.F1))
+        assertEquals(0, p.level)
+        for (t in 0 until 36) if (t % 6 >= 4 || t / 6 >= 5) assertNull(p.probs[t], "tile $t")
+        assertEquals(0.0, total(p, Cls.TRAP), 1e-6)
+        assertEquals(1.0, total(p, Cls.YELLOW), 1e-4)
+        assertEquals(1.0, total(p, Cls.BLOOD), 1e-4)
+        assertEquals(1.0, total(p, Cls.FAIRY), 1e-4)
+        assertEquals(2.0, total(p, Cls.PUZZLE), 1e-4)
+    }
+
+    @Test fun bloodIsThreeStepsPastAKnownFairyOnTheLowerFloors() {
+        // F3: a 1x3 down from the entrance, then a wither door from its end (1,3) to the fairy at (2,3), four
+        // steps in, and its wither door on to (3,3): blood's walk is 7, 3 steps past the fairy
+        val v = map(
+            listOf(Kind.ENTRANCE to intArrayOf(1), Kind.NORMAL to intArrayOf(7, 13, 19), Kind.FAIRY to intArrayOf(20)),
+            listOf(Triple(1, 7, Edge.DOOR), Triple(19, 20, Edge.WITHER), Triple(20, 21, Edge.WITHER), Triple(13, 14, Edge.DOOR)),
+            2, FloorRules.F3,
+        )
+        val p = predict(v, 300)
+        assertEquals(0, p.level)
+        var seen = 0.0
+        for (t in 0 until 36) {
+            val b = p.probs[t]?.get(Cls.BLOOD) ?: continue
+            if (b <= 0f) continue
+            seen += b
+            assertTrue(dist(t, 20) % 2 == 1 && dist(t, 20) <= 3, "blood at $t, ${dist(t, 20)} from the fairy")
+        }
+        assertEquals(1.0, seen, 1e-4)
+    }
+
+    /** F5's puzzle column tiles (x = 5): what the samples put there. */
+    private fun columnTiles(p: Prediction) = (0 until 6).map { p.probs[it * 6 + 5] }
+
+    @Test fun thePuzzleColumnTopsUpTheDeadEnds() {
+        // F5 with 3 puzzles: trap, yellow and the puzzles are the 5 dead ends the column tops up to
+        val p = predict(opening(3, FloorRules.F5))
+        assertEquals(0, p.level)
+        assertEquals(3.0, total(p, Cls.PUZZLE), 1e-4)
+        assertEquals(1.0, total(p, Cls.TRAP), 1e-4)
+        assertEquals(1.0, total(p, Cls.BLOOD), 1e-4)
+        var puzzles = 0.0
+        for (probs in columnTiles(p)) {
+            if (probs == null) continue
+            // a 1x1 dead end or nothing: never a normal room, blood or the fairy
+            for (c in intArrayOf(Cls.BIG, Cls.NORMAL, Cls.BLOOD, Cls.FAIRY)) assertEquals(0f, probs[c])
+            assertTrue(probs.sum() <= 1.0001f)
+            puzzles += probs[Cls.PUZZLE]
+        }
+        assertTrue(puzzles > 0.05, "puzzles in the column: $puzzles")
+    }
+
+    @Test fun noPuzzleColumnPastItsTarget() {
+        // F5 with 4 puzzles: more dead ends than the column tops up to, so it's empty
+        val p = predict(opening(4, FloorRules.F5))
+        assertEquals(0, p.level)
+        assertTrue(columnTiles(p).all { it == null })
+        assertEquals(4.0, total(p, Cls.PUZZLE), 1e-4)
+    }
+
+    /** F5: a 1x3 east of the entrance along the top row up to the column, a wither door down from its middle. */
+    private fun besideTheColumn(door: Boolean) = map(
+        listOf(Kind.ENTRANCE to intArrayOf(1), Kind.NORMAL to intArrayOf(2, 3, 4)),
+        listOf(Triple(1, 2, Edge.DOOR), Triple(3, 9, Edge.WITHER)) + if (door) listOf(Triple(4, 5, Edge.DOOR)) else emptyList(),
+        3, FloorRules.F5,
+    )
+
+    @Test fun aColumnTileBehindADoorIsADeadEnd() {
+        val p = predict(besideTheColumn(true))
+        val tile = assertNotNull(p.probs[5])
+        assertEquals(1f, tile[Cls.PUZZLE] + tile[Cls.TRAP] + tile[Cls.YELLOW] + tile[Cls.RARE], 1e-4f)
+        assertTrue(tile[Cls.PUZZLE] > 0.5f)
+    }
+
+    @Test fun aColumnTileBehindAWallIsEmpty() {
+        val p = predict(besideTheColumn(false))
+        assertNull(p.probs[5])
+        assertTrue(p.splits.none { it.tile == 5 })
+    }
+
     @Test fun aMapNoTreeFitsGivesNothing() {
         // (2,0) has doors from the entrance and from the room below it: two ways in from the known side
         val v = map(
@@ -148,5 +298,85 @@ class MapPredictorTest {
         val p = MapPredictor(v)
         assertEquals(0, p.run(50, 5_000, Random(1)))
         assertNull(p.prediction())
+    }
+    /** [opening] with a puzzle someone has been in behind its east door, at (3,1), and the tab's puzzle lines [slots]. */
+    private fun quizEast(slots: List<String?>, rules: FloorRules = FloorRules.F7): MapView {
+        val v = MapView(6, 6, 3, rules)
+        assertNotNull(v.addRoom(Kind.ENTRANCE, intArrayOf(1)))
+        assertNotNull(v.addRoom(Kind.NORMAL, intArrayOf(7, 8, 13, 14)))
+        assertNotNull(v.addRoom(Kind.PUZZLE, intArrayOf(9), "Quiz"))
+        val doors = mapOf((1 to 7) to Edge.DOOR, (14 to 20) to Edge.WITHER, (8 to 9) to Edge.DOOR, (6 to 7) to Edge.DOOR)
+        v.closeEdges { a, b -> doors[minOf(a, b) to maxOf(a, b)] }
+        v.puzzleSlots = slots
+        return v
+    }
+
+    /** The tab's order: column by column (x, then z). */
+    private fun before(t: Int, of: Int) = t % 6 * 6 + t / 6 < of % 6 * 6 + of / 6
+
+    private fun puzzlesWhere(p: Prediction, where: (Int) -> Boolean) = (0 until 36).filter(where).sumOf { (p.raw[it]?.get(Cls.PUZZLE) ?: 0f).toDouble() }
+
+    @Test fun theTabsFirstPuzzleHasNoneBeforeIt() {
+        val p = predict(quizEast(listOf("Quiz", null, null)))
+        assertEquals(0, p.level)
+        assertEquals(0.0, puzzlesWhere(p) { before(it, 9) }, 1e-4)
+        assertEquals(2.0, puzzlesWhere(p) { !before(it, 9) && it != 9 }, 1e-4)
+    }
+
+    @Test fun theTabsLastPuzzleHasEveryOtherBeforeIt() {
+        val p = predict(quizEast(listOf(null, null, "Quiz")))
+        assertEquals(0, p.level)
+        assertEquals(2.0, puzzlesWhere(p) { before(it, 9) }, 1e-4)
+    }
+
+    @Test fun theTabsMiddlePuzzleSplitsTheRest() {
+        val p = predict(quizEast(listOf(null, "Quiz", null)))
+        assertEquals(1.0, puzzlesWhere(p) { before(it, 9) }, 1e-4)
+        assertEquals(1.0, puzzlesWhere(p) { !before(it, 9) && it != 9 }, 1e-4)
+    }
+
+    @Test fun aPuzzleNotFirstInTheTabMakesTheDeadEndBeforeItAPuzzle() {
+        // Quiz in the bottom-left corner, (0,5), second on the tab: one puzzle comes before it, so in the left
+        // column above it; there the only 1x1 dead end can be (0,0), at the end of the column from (0,4)
+        val v = MapView(6, 6, 5, FloorRules.F7)
+        assertNotNull(v.addRoom(Kind.ENTRANCE, intArrayOf(1)))
+        assertNotNull(v.addRoom(Kind.NORMAL, intArrayOf(7, 13, 19, 25)))
+        assertNotNull(v.addRoom(Kind.NORMAL, intArrayOf(31)))
+        assertNotNull(v.addRoom(Kind.PUZZLE, intArrayOf(30), "Quiz"))
+        assertNotNull(v.addRoom(Kind.NORMAL, intArrayOf(24)))
+        val doors = mapOf((1 to 7) to Edge.DOOR, (25 to 31) to Edge.DOOR, (30 to 31) to Edge.DOOR, (24 to 25) to Edge.DOOR,
+            (18 to 24) to Edge.DOOR, (19 to 20) to Edge.WITHER, (7 to 8) to Edge.DOOR)
+        v.closeEdges { a, b -> doors[minOf(a, b) to maxOf(a, b)] }
+        assertTrue(predict(v).probs[0]!![Cls.PUZZLE] < 0.9f)
+        v.puzzleSlots = listOf(null, "Quiz", null, null, null)
+        val p = predict(v)
+        assertEquals(0, p.level)
+        assertEquals(1f, p.probs[0]!![Cls.PUZZLE], 1e-4f)
+    }
+
+    @Test fun withoutTheTabOrderPuzzlesGoAnywhere() {
+        // unnamed slots, or a floor without the rule: nothing pinned
+        for (v in listOf(quizEast(listOf(null, null, null)), quizEast(listOf("Quiz", null, null), FloorRules.F6))) {
+            val p = predict(v)
+            assertTrue(puzzlesWhere(p) { before(it, 9) } > 0.1)
+            assertTrue(puzzlesWhere(p) { !before(it, 9) && it != 9 } > 0.1)
+        }
+    }
+
+    @Test fun anLNeverHasItsNorthWestCornerMissing() {
+        val p = predict(opening())
+        val ls = p.bigRooms.filter { it.tiles.size == 3 && MapView.shapeOf(it.tiles, 6) == Shape.L }
+        assertTrue(ls.isNotEmpty())
+        for (l in ls) {
+            val x0 = l.tiles.minOf { it % 6 }; val z0 = l.tiles.minOf { it / 6 }
+            assertTrue(z0 * 6 + x0 in l.tiles, "an L at ${l.tiles.toList()} without its north-west corner")
+        }
+    }
+
+    @Test fun bothBlazeRoomsAreHigherOrLower() {
+        assertTrue(MapPredictor.isTabPuzzle("Lower Blaze", "Higher Or Lower"))
+        assertTrue(MapPredictor.isTabPuzzle("Higher Blaze", "Higher Or Lower"))
+        assertTrue(MapPredictor.isTabPuzzle("Quiz", "Quiz"))
+        assertTrue(!MapPredictor.isTabPuzzle("Quiz", "Boulder") && !MapPredictor.isTabPuzzle(null, "Quiz"))
     }
 }

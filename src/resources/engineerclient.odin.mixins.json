@@ -12,6 +12,8 @@
     "LeapMenuRenderMixin",
     "OdinTermTimesMixin",
     "PanelOrderMixin",
+    "PanelOnScreenMixin",
+    "HudOnScreenMixin",
     "PersonalBestSimMixin",
     "SecretsCounterMixin",
     "SimonSaysBlocksMixin",
@@ -20,7 +22,10 @@
     "HighlightRenderMixin",
     "TermGuiButtonMixin",
     "LcmStyleMixin",
-    "MapPathHintsMixin"
+    "LcmMapInfoMixin",
+    "MapPathHintsMixin",
+    "TpMazeRenderMixin",
+    "TerminalClickLimitMixin"
   ],
   "injectors": {
     "defaultRequire": 0

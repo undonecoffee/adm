@@ -11,10 +11,13 @@ package com.engineerclient.mappred
  *  - walked tile by tile, the wither path is 9 or 10 steps from the entrance to blood (whichever
  *    the parity of their distance allows; 7/8 where a big room cuts a corner), and the fairy is a
  *    1x1 exactly 4 steps before blood
- *  - trap, yellow and puzzles are spread at random over the other 1x1 dead ends
+ *  - trap, yellow and puzzles are spread at random over the other 1x1 dead ends, but the tab list
+ *    lists the puzzles in their order on the map, column by column (x, then z), so each named one
+ *    says how many puzzles come before it ([FloorRules.puzzleOrder])
  *
  * The weights were fitted so that maps sampled from the first two rooms of a run come out like the
- * recorded ones (tools/mappred, which also re-checks every rule).
+ * recorded ones (tools/mappred, which also re-checks every rule). The other floors follow the same rules
+ * with their own numbers ([FloorRules], [FloorStats]); their rooms are among [NAMES], with the same secrets.
  */
 object MapStats {
     /** Big room shape counts (1x2, 1x3, 1x4, 2x2, L) and how many maps had them. */
@@ -61,6 +64,17 @@ object MapStats {
     )
 
     /** Fairy steps before blood on the wither path. */
+    /**
+     * The calibration of the tiles' chances (tools/mappred calfit.mjs, KEEPZERO, on 300 training maps' snapshots
+     * with the held cells): per Cls (big, 1x1, puzzle, trap, yellow, blood, fairy, rare) the sharpness a, the
+     * offset b and the change d per 3 rooms known. Held-out per-tile log-likelihood -1.0417 to -1.0393.
+     */
+    val CALIBRATION = arrayOf(
+        doubleArrayOf(0.8835, 0.8623, 0.8383, 0.8911, 0.8757, 0.9302, 0.9268, 0.9375),
+        doubleArrayOf(0.1616, -0.0055, -0.0908, -0.1025, -0.1381, 0.0736, 0.0567, 0.0450),
+        doubleArrayOf(-0.0212, -0.0107, 0.0095, 0.0098, 0.0148, 0.0206, -0.0228, 0.0000),
+    )
+
     const val FAIRY_BEFORE_BLOOD = 4
 
     /** Chance a sample with dead ends past the puzzles (5-puzzle maps only) keeps them as rare rooms. */

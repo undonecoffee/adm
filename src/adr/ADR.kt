@@ -28,6 +28,11 @@ import net.minecraft.network.chat.Style
 import net.minecraft.network.chat.TextColor
 import net.minecraft.network.protocol.game.ClientboundBlockEventPacket
 import net.minecraft.network.protocol.game.ClientboundSystemChatPacket
+import net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket
+import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket
+import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket
+import net.minecraft.network.protocol.game.ClientboundClearTitlesPacket
+import net.minecraft.network.protocol.game.ClientboundBossEventPacket
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket
 import net.minecraft.network.protocol.game.ClientboundSoundPacket
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket
@@ -66,7 +71,6 @@ object ADR : Module(
 ) {
     private val privateRuns by BooleanSetting("Private Runs", true, desc = "Uploaded runs aren't listed on the viewer's home page: only people you give the link to can open them, unless someone in your party uploads the same run publicly - then yours shows as one of its POVs. /adr gives you a link to all your runs, private ones included.")
     private val hidePrivateChats by BooleanSetting("Hide Private Chats", true, desc = "Leaves private messages, guild, officer and co-op chat, friend requests and friends coming online out of recordings, so they are never saved (they are never uploaded either way).")
-    private val recordAds by BooleanSetting("Record ADS Runs", true, desc = "Records your ADS full runs (the clear and the boss in the ADS world) into config/adm/adr/sim, on this computer only: they are never uploaded. Used to check ADS against real runs.")
     private val hidePartyChat by BooleanSetting("Hide Party Chat", false, desc = "Leaves party chat out of recordings and uploads. Off, the viewer shows what your party said during the run.")
     // The chat lines each run brings. Errors (a failed upload or save) always show.
     val savedMessage by BooleanSetting("Saved Message", true, desc = "Says \"saved run\" in chat, with the file's size, when a run's recording is saved.")
@@ -99,8 +103,10 @@ object ADR : Module(
     private val http: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build()
 
     private var session: RunRecorder? = null
-    private val simDir get() = EngineerClient.mc.gameDirectory.toPath().resolve("config").resolve("adm").resolve("adr").resolve("sim")
+    /** This world's recording once it is known to be a Hypixel dungeon run (for layers that ride on it, like Better Recorder). */
+    internal val recording: RunRecorder? get() = session?.takeIf { it.isConfirmed && !it.abandoned && !EngineerClient.mc.isLocalServer }
     private val runsDir get() = EngineerClient.mc.gameDirectory.toPath().resolve("config").resolve("adm").resolve("adr").resolve("runs")
+    private val catDir get() = EngineerClient.mc.gameDirectory.toPath().resolve("config").resolve("adm").resolve("adr").resolve("catalogue")
 
     init {
         on<LevelEvent.Load> {
@@ -108,9 +114,9 @@ object ADR : Module(
             EngineerClient.safely("adr start") {
                 session?.finish()
                 RoomKeys.reset()
-                // An ADS full run is recorded too, into its own folder and never uploaded: it is what the sim is checked against the real runs with.
+                // Never the ADS world (the boss practice): it is not a Hypixel run.
                 val adsWorld = com.engineerclient.p3sim.SimServer.server != null && EngineerClient.mc.hasSingleplayerServer()
-                session = if (adsWorld) (if (recordAds) RunRecorder(simDir, true, sim = true) else null) else RunRecorder(runsDir, true, ::upload)
+                session = if (adsWorld) null else RunRecorder(runsDir, true, ::upload)
             }
         }
 
@@ -184,7 +190,7 @@ object ADR : Module(
         // Chat straight off the network, before any mod can hide it (chat cleaners hide the terminal /
         // device / gate messages the report needs). Handed to the client thread, where ticks happen.
         onReceive<ClientboundSystemChatPacket>(priority = 1000, ignoreCancelled = true) {
-            if (overlay) return@onReceive
+            if (overlay) { val c = content; EngineerClient.mc.execute { EngineerClient.safely("adr action bar") { session?.let { it.hud.actionBar(it.currentTick, c) } } }; return@onReceive }
             val text = content.string.replace(CONTROL_CODES, "")
             val colored = legacyText(content)
             // The answer to a /p list ADR sent itself: read, and kept out of chat.
@@ -202,6 +208,15 @@ object ADR : Module(
             if (b0 != 1 || (block != Blocks.CHEST && block != Blocks.TRAPPED_CHEST && block != Blocks.ENDER_CHEST)) return@onReceive
             val at = pos.immutable(); val open = b1
             EngineerClient.mc.execute { EngineerClient.safely("adr chest") { session?.onChestEvent(at, open) } }
+        }
+        // The HUD as the server sends it (HudCapture): the action bar (also sent as overlay chat, above), titles and boss bars.
+        onReceive<ClientboundSetActionBarTextPacket> { val c = text(); EngineerClient.mc.execute { EngineerClient.safely("adr action bar") { session?.let { it.hud.actionBar(it.currentTick, c) } } } }
+        onReceive<ClientboundSetTitleTextPacket> { val c = text(); EngineerClient.mc.execute { EngineerClient.safely("adr title") { session?.let { it.hud.title(it.currentTick, false, c) } } } }
+        onReceive<ClientboundSetSubtitleTextPacket> { val c = text(); EngineerClient.mc.execute { EngineerClient.safely("adr title") { session?.let { it.hud.title(it.currentTick, true, c) } } } }
+        onReceive<ClientboundClearTitlesPacket> { EngineerClient.mc.execute { EngineerClient.safely("adr title") { session?.let { it.hud.title(it.currentTick, false, null) } } } }
+        onReceive<ClientboundBossEventPacket> {
+            val packet = this
+            EngineerClient.mc.execute { EngineerClient.safely("adr boss bar") { session?.let { s -> packet.dispatch(BossBars(s)) } } }
         }
         on<RoomEnterEvent> { EngineerClient.safely("adr room") { session?.onRoomEnter(room?.name) } }
 
@@ -281,9 +296,25 @@ object ADR : Module(
                 // Party members recording the same run take turns, so the first one's recording is on
                 // the site when the next ones look for it ([waitForSibling]).
                 val scan = UploadPacker.scan(file, privateRuns)
-                val id = send(file, scan, waitForSibling(scan.summary))
+                val sibling = waitForSibling(scan.summary)
+                // A connection dropped on the way (Cloudflare resetting the stream, a moment
+                // offline) is tried again twice, after 10 s and a minute. If the first try did get
+                // there after all, the site says this run is already uploaded: that's done too.
+                var id: String? = null
+                for ((i, wait) in listOf(0L, 10_000L, 60_000L).withIndex()) {
+                    if (wait > 0) Thread.sleep(wait)
+                    try {
+                        id = send(file, scan, sibling); break
+                    } catch (e: java.io.IOException) {
+                        if (i == 2) throw e
+                        EngineerClient.logger.warn("[ec] adr upload try ${i + 1} failed, trying again: $e")
+                    } catch (e: Refused) {
+                        if (i == 0 || !e.message.orEmpty().startsWith("409")) throw e
+                        id = ""; break
+                    }
+                }
                 uploadFailSaid = false
-                if (uploadedMessage) EngineerClient.msg("§7ADR: uploaded${if (privateRuns) " privately" else ""} - §f$SITE/adr/$id")
+                if (uploadedMessage) EngineerClient.msg("§7ADR: uploaded${if (privateRuns) " privately" else ""}${if (id.isNullOrEmpty()) "" else " - §f$SITE/adr/$id"}")
             } catch (t: Throwable) {
                 if (t !is Refused) EngineerClient.logger.error("[ec] adr upload failed", t)
                 else EngineerClient.logger.warn("[ec] adr upload refused: ${t.message}")
@@ -354,6 +385,12 @@ object ADR : Module(
         }.onFailure { EngineerClient.logger.warn("[ec] adr: sibling download failed", it) }.getOrNull()
     }
 
+    /** One of the site's catalogue files (Catalogue), or null. */
+    private fun catalogueBytes(name: String): ByteArray? = runCatching {
+        val got = http.send(HttpRequest.newBuilder(URI.create("https://$SITE/adr/cat/$name")).timeout(Duration.ofMinutes(2)).GET().build(), HttpResponse.BodyHandlers.ofInputStream())
+        got.body().use { s -> if (got.statusCode() != 200) null else s.readNBytes(16 shl 20) }
+    }.onFailure { EngineerClient.logger.warn("[ec] adr: catalogue download failed", it) }.getOrNull()
+
     /** A party member's upload bigger than this (a real one is a few MB) is left alone. */
     private const val SIBLING_MAX = 16 shl 20
     private val RUN_ID = Regex("""[A-Za-z0-9_-]{1,64}""")
@@ -361,8 +398,10 @@ object ADR : Module(
     /** Sends one run, on the calling thread. Its id on the site. */
     private fun send(file: Path, scan: UploadPacker.Scan = UploadPacker.scan(file, privateRuns), siblingId: String? = askSibling(scan.summary)?.first): String {
         val summary = scan.summary
-        // Without the mobs a party member's recording already on the site has (UploadPacker), as xz.
-        val (packed, left) = UploadPacker.pack(file, scan, siblingId?.let(::siblingBytes), hideParty = hidePartyChat)
+        // Without the mobs a party member's recording already on the site has (UploadPacker), as xz;
+        // what the site's catalogues have as their numbers (Catalogue).
+        val cat = runCatching { Catalogue.load(catDir, ::catalogueBytes) }.onFailure { EngineerClient.logger.warn("[ec] adr: no catalogue", it) }.getOrNull()
+        val (packed, left) = UploadPacker.pack(file, scan, siblingId?.let(::siblingBytes), hideParty = hidePartyChat, cat = cat)
         if (left > 0) EngineerClient.logger.info("[ec] adr: $left mobs left out, already uploaded by a party member")
         try {
             return sendPacked(packed, summary)
@@ -372,10 +411,13 @@ object ADR : Module(
     }
 
     private fun sendPacked(file: Path, summary: JsonObject): String {
-        // The site checks it, and takes a limited number an hour (more for solo runs).
+        // The site checks it, and takes a limited number an hour (more for solo runs). Signed in as
+        // its recorder ([ADRAuth]) when that can be done, marking it verified; without, if not.
+        val auth = summary["self"]?.asString?.let(ADRAuth::headerFor)
         val req = HttpRequest.newBuilder(URI.create(RUNS_URL))
             .header("X-Run-Summary", summary.toString())
             .header("X-Run-Owner", token())
+            .apply { if (auth != null) header("X-ADR-Auth", auth) }
             .header("Content-Type", "application/octet-stream")
             .timeout(Duration.ofMinutes(5))
             .POST(HttpRequest.BodyPublishers.ofFile(file))
@@ -534,4 +576,13 @@ object ADR : Module(
         OnlineLink.close()
         super.onDisable()
     }
+}
+
+/** A boss bar packet into the recording (HudCapture.bossBar). */
+private class BossBars(private val s: RunRecorder) : ClientboundBossEventPacket.Handler {
+    override fun add(id: java.util.UUID, name: Component, progress: Float, color: net.minecraft.world.BossEvent.BossBarColor, overlay: net.minecraft.world.BossEvent.BossBarOverlay, darkenScreen: Boolean, playMusic: Boolean, createWorldFog: Boolean) =
+        s.hud.bossBar(s.currentTick, id, name, progress, false)
+    override fun remove(id: java.util.UUID) = s.hud.bossBar(s.currentTick, id, null, null, true)
+    override fun updateProgress(id: java.util.UUID, progress: Float) = s.hud.bossBar(s.currentTick, id, null, progress, false)
+    override fun updateName(id: java.util.UUID, name: Component) = s.hud.bossBar(s.currentTick, id, name, null, false)
 }

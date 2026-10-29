@@ -26,6 +26,7 @@ import net.minecraft.world.entity.projectile.arrow.AbstractArrow
 import net.minecraft.world.entity.projectile.hurtingprojectile.AbstractHurtingProjectile
 import net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull
 import net.minecraft.util.Mth
+import net.minecraft.world.level.block.AbstractSkullBlock
 import net.minecraft.world.level.block.entity.SkullBlockEntity
 import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.level.chunk.status.ChunkStatus
@@ -59,8 +60,6 @@ class RunRecorder(
     private val dir: Path,
     private val captureGeometry: Boolean,
     private val onSaved: (Path) -> Unit = {},
-    /** A recording of an ADS run (the sim's world): kept once the run starts, never uploaded ([ADR]). */
-    private val sim: Boolean = false,
 ) {
 
     private var tick = 0
@@ -115,6 +114,9 @@ class RunRecorder(
 
     // Geometry: the rooms are all in the server's room library; each run only reads its doorways (GeometryCapture).
     private val geometry = GeometryCapture(::emit)
+    // The HUD (tab list, sidebar, boss bars, titles, action bar), and the research probes (Probes: removable).
+    val hud = HudCapture(::emit)
+    private val probes = Probes(::emit)
     private val palette = HashMap<BlockState, Int>()
 
     // ------------------------------------------------------------------ inputs
@@ -123,10 +125,7 @@ class RunRecorder(
         flushFrames()
         flushMouse()
         tick++
-        if (!confirmed && sim) {
-            // An ADS run: kept from the moment the run tells the client its stage (the world is made for it, so the recording still starts at load).
-            if (com.engineerclient.p3sim.run.ClientRun.inRun) confirm() else if (tick > ABANDON_AFTER_TICKS) { abandon(); return }
-        } else if (!confirmed && com.engineerclient.p3sim.P3Sim.inSim) {
+        if (!confirmed && com.engineerclient.p3sim.P3Sim.inSim) {
             // Never the P3 Sim world as a Hypixel run: Odin is told it is in F7 there, and ADR would take it for one.
             abandon(); return
         } else if (!confirmed) {
@@ -157,6 +156,8 @@ class RunRecorder(
         recordEntities(level)
         if (confirmed) recordSkulls(level)
         if (confirmed && captureGeometry) geometry.tick(level, tick)
+        hud.tick(tick)
+        if (confirmed) probes.tick(level, tick)
         flushPending()
     }
 
@@ -192,6 +193,7 @@ class RunRecorder(
     }
 
     fun onBlockUpdate(pos: BlockPos, state: BlockState) {
+        if (state.block is AbstractSkullBlock && freshSkulls.size < FRESH_SKULLS) freshSkulls.putIfAbsent(pos.immutable(), tick)
         emit("""{"k":"block","t":$tick,"x":${pos.x},"y":${pos.y},"z":${pos.z},"s":${paletteIndex(state)}}""")
     }
 
@@ -207,6 +209,11 @@ class RunRecorder(
 
     /** The server tick count right now: read on the network thread, where the pings are counted. */
     val serverTickCount: Int get() = serverTicks
+    /** Ticks since the world loaded: what every line's "t" counts. */
+    val currentTick: Int get() = tick
+    val isConfirmed: Boolean get() = confirmed
+    /** When the world loaded, as the saved file's name starts (yyyy-MM-dd_HH-mm-ss). */
+    val stamp: String get() = startedAt.format(STAMP)
 
     // ------------------------------------------------------------------ what you do
     /** A container slot click you sent (any window, any way: mouse, Odin's terminal GUI, keys). */
@@ -376,18 +383,12 @@ class RunRecorder(
         val version = modVersion("engineerclient")
         // The game version as running, not a literal: this file ships on more than one MC version.
         val mc = modVersion("minecraft")
-        writeNow("""{"k":"meta","format":2,"mod":${str(version)},"mc":${str(mc)},"self":${str(self)},"startMs":${System.currentTimeMillis() - tick * 50L},"confirmedAtTick":$tick,"geometry":$captureGeometry,"farHalf":$FAR_HALF,"stx":1${simMeta()}}""")
+        writeNow("""{"k":"meta","format":2,"mod":${str(version)},"mc":${str(mc)},"self":${str(self)},"startMs":${System.currentTimeMillis() - tick * 50L},"confirmedAtTick":$tick,"geometry":$captureGeometry,"farHalf":$FAR_HALF,"stx":1}""")
         backlog.forEach(::writeNow)
         backlog.clear()
         flushPending()
     }
 
-    /** An ADS run's layout and seed, for comparing it with the recording it was built from. */
-    private fun simMeta(): String {
-        if (!sim) return ""
-        val (layout, seed) = com.engineerclient.p3sim.run.RunLauncher.lastLaunch ?: return ",\"ads\":{}"
-        return ",\"ads\":{\"layout\":${str(layout)},\"seed\":$seed}"
-    }
 
     private fun abandon() {
         abandoned = true
@@ -797,6 +798,9 @@ class RunRecorder(
     // Player heads placed as blocks (skulls on walls, floors, the boss arena): their skin, once per
     // position and again if it changes. The viewer would otherwise draw a default head.
     private val lastSkull = HashMap<BlockPos, String>()
+    // Heads just placed (and when): looked at the next ticks too, till their skin is in - the sweep
+    // below misses heads that are gone within a second (the boss arena's animated ones).
+    private val freshSkulls = HashMap<BlockPos, Int>()
 
     // Each chunk around you is looked at once a second, a twentieth of them each tick: all 625 in
     // one tick made that tick a spike.
@@ -804,6 +808,15 @@ class RunRecorder(
         val player = EngineerClient.mc.player ?: return
         val cx = player.blockPosition().x shr 4
         val cz = player.blockPosition().z shr 4
+        val fresh = freshSkulls.entries.iterator()
+        while (fresh.hasNext()) {
+            val (pos, at) = fresh.next()
+            val be = level.getBlockEntity(pos) as? SkullBlockEntity
+            val tex = be?.ownerProfile?.let { texturesOf(it.partialProfile().properties()) }
+            if (tex == null) { if (tick - at > FRESH_TICKS) fresh.remove(); continue }
+            fresh.remove()
+            if (lastSkull.put(pos, tex) != tex) emit("""{"k":"skull","t":$tick,"x":${pos.x},"y":${pos.y},"z":${pos.z},"tex":${str(tex)}}""")
+        }
         val slice = tick % 20
         for (x in cx - SKULL_CHUNKS..cx + SKULL_CHUNKS) for (z in cz - SKULL_CHUNKS..cz + SKULL_CHUNKS) {
             if (Math.floorMod(x * 7 + z, 20) != slice) continue
@@ -947,6 +960,8 @@ class RunRecorder(
         private val DYE = Regex("#[0-9a-f]{6}")
         // How far around you (in chunks) placed player heads are looked for, every second.
         const val SKULL_CHUNKS = 12
+        private const val FRESH_SKULLS = 4096
+        private const val FRESH_TICKS = 5
         val STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
     }
 }
