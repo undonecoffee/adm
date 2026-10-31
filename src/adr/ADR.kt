@@ -69,7 +69,7 @@ object ADR : Module(
     description = "Records everything about each dungeon run (players, mobs, blocks, chat, rooms) and uploads it to the ADR viewer (undonecoffee.com/adr), where it can be replayed in the browser. Runs here older than 30 days that the viewer has are deleted from this computer.",
     key = null,
 ) {
-    private val privateRuns by BooleanSetting("Unlisted Runs", true, desc = "Uploaded runs aren't listed on the viewer's home page: only people you give the link to can open them, unless someone in your party uploads the same run publicly - then yours shows as one of its POVs. /adr gives you a link to all your runs, unlisted ones included.")
+    private var privateRuns by BooleanSetting("Unlisted Runs", true, desc = "Uploaded runs aren't listed on the viewer's home page: only people you give the link to can open them, unless someone in your party uploads the same run publicly - then yours shows as one of its POVs. /adr gives you a link to all your runs, unlisted ones included.")
     private val hidePrivateChats by BooleanSetting("Hide Private Chats", true, desc = "Leaves private messages, guild, officer and co-op chat, friend requests and friends coming online out of recordings, so they are never saved (they are never uploaded either way).")
     private val hidePartyChat by BooleanSetting("Hide Party Chat", false, desc = "Leaves party chat out of recordings and uploads. Off, the viewer shows what your party said during the run.")
     // The chat lines each run brings. Errors (a failed upload or save) always show.
@@ -79,6 +79,8 @@ object ADR : Module(
      * A secret this install sends with every upload, so the site can list this player's runs -
      * unlisted ones included - for whoever has it: the link /adr gives. Made on first use.
      */
+    // Asked the site once (runs/relist) whether the rename from "Private Runs" reset this player's choice.
+    private var unlistedChecked by BooleanSetting("Unlisted Runs Checked", false, desc = "").hide()
     private var ownerToken by StringSetting("Owner Token", "", 64, desc = "Identifies your uploads for /adr's link.", placeholder = "").hide()
 
     internal fun token(): String {
@@ -123,7 +125,7 @@ object ADR : Module(
 
     init {
         on<LevelEvent.Load> {
-            if (!tidied) { tidied = true; tidyRunsFolder() }
+            if (!tidied) { tidied = true; tidyRunsFolder(); checkUnlisted(); uploadMissing(auto = true) }
             EngineerClient.safely("adr start") {
                 session?.finish()
                 RoomKeys.reset()
@@ -522,6 +524,33 @@ object ADR : Module(
         }
     }
 
+    /**
+     * Once per install: "Private Runs" became "Unlisted Runs" (2026-10-30, ADM 1.0.10), and the
+     * saved choice didn't carry over, so everyone who had turned it off was back to unlisted. The
+     * site knows (their last upload before was listed): it lists their uploads since, and the
+     * setting goes back off here.
+     */
+    private fun checkUnlisted() {
+        if (unlistedChecked) return
+        Thread.ofVirtual().name("adr-unlisted-check").start {
+            try {
+                val res = http.send(HttpRequest.newBuilder(URI.create("$RUNS_URL/relist")).header("X-Run-Owner", token())
+                    .timeout(Duration.ofSeconds(30)).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString())
+                if (res.statusCode() != 200) return@start
+                val o = JsonParser.parseString(res.body()).asJsonObject
+                if (o["listed"]?.asBoolean == true) {
+                    privateRuns = false
+                    val n = o["relisted"]?.asInt ?: 0
+                    EngineerClient.msg("§7ADR: an update had switched §fUnlisted Runs§7 on - it's off again, as you had it${if (n > 0) ", and your $n runs since are listed again" else ""}.")
+                }
+                unlistedChecked = true
+                com.odtheking.odin.features.ModuleManager.saveConfigurations()
+            } catch (t: Throwable) {
+                EngineerClient.logger.warn("[ec] adr: unlisted check failed", t)
+            }
+        }
+    }
+
     @Volatile private var uploadFailSaid = false
 
     /**
@@ -530,16 +559,26 @@ object ADR : Module(
      * to their owner, so the owner token goes with the question.
      * The one being recorded is still a .part file, so it is never picked up. Runs even with Upload
      * Runs off - pressing the button is the ask.
+     *
+     * [auto]: once a game, on the first world: only runs saved in the last [AUTO_DAYS] days, quietly
+     * (said only when it sends some). A run's own upload dies with the game, and closing the game
+     * right after a run ends that run then (2026-10-28/29: most of the runs missing from the site
+     * were saved 1-3 s before the game closed), so the next game sends it.
      */
-    private fun uploadMissing() {
+    private fun uploadMissing(auto: Boolean = false) {
 
-        if (catchingUp) return EngineerClient.msg("§7ADR: already uploading missing runs.")
+        if (catchingUp) return if (auto) Unit else EngineerClient.msg("§7ADR: already uploading missing runs.")
         catchingUp = true
         Thread.ofVirtual().name("adr-catch-up").start {
             try {
+                // (after the world's first seconds, and the folder tidied)
+                if (auto) Thread.sleep(30_000L)
                 // Asks by name rather than reading the run list, which leaves unlisted runs off; with the
                 // owner token, without which the site doesn't say whether it has an unlisted run.
-                val local = Files.list(runsDir).use { s -> s.filter { it.fileName.toString().endsWith(".jsonl.gz") }.sorted().toList() }
+                if (auto && !Files.isDirectory(runsDir)) return@start
+                val since = System.currentTimeMillis() - AUTO_DAYS * 86_400_000L
+                val local = Files.list(runsDir).use { s -> s.filter { it.fileName.toString().endsWith(".jsonl.gz") && (!auto || Files.getLastModifiedTime(it).toMillis() > since) }.sorted().toList() }
+                if (auto && local.isEmpty()) return@start
                 val keys = local.associateWith { runKey(it) }
                 val ask = JsonArray().also { arr -> keys.values.filterNotNull().forEach { arr.add(it) } }
                 val have = http.send(HttpRequest.newBuilder(URI.create("$RUNS_URL/have")).header("Content-Type", "application/json").header("X-Run-Owner", token())
@@ -547,32 +586,39 @@ object ADR : Module(
                 if (have.statusCode() != 200) throw Refused("run check ${have.statusCode()}")
                 val onSite = JsonParser.parseString(have.body()).asJsonArray.mapTo(HashSet()) { it.asString }
                 val missing = local.filter { f -> keys[f]?.let { it !in onSite } ?: false }
-                if (missing.isEmpty()) return@start EngineerClient.msg("§7ADR: all ${local.size} runs here are already on the viewer.")
-                EngineerClient.msg("§7ADR: ${missing.size} of ${local.size} runs aren't on the viewer - uploading them.")
+                if (missing.isEmpty()) return@start if (auto) Unit else EngineerClient.msg("§7ADR: all ${local.size} runs here are already on the viewer.")
+                if (!auto) EngineerClient.msg("§7ADR: ${missing.size} of ${local.size} runs aren't on the viewer - uploading them.")
                 var done = 0
                 for ((i, f) in missing.withIndex()) {
                     try {
                         send(f)
                         done++
-                        EngineerClient.msg("§7ADR: uploaded ${i + 1}/${missing.size} §8(${f.fileName})")
+                        if (!auto) EngineerClient.msg("§7ADR: uploaded ${i + 1}/${missing.size} §8(${f.fileName})")
                     } catch (t: Throwable) {
+                        // Already there (the site has it from another install, or it was deleted there): done.
+                        if (t is Refused && t.message?.startsWith("409") == true) continue
                         // The site takes a limited number an hour: the rest another time.
                         if (t is Refused && t.message?.startsWith("429") == true) {
+                            if (auto) { if (done > 0) EngineerClient.msg("§7ADR: uploaded $done run${if (done == 1) "" else "s"} that didn't finish uploading last time."); return@start }
                             EngineerClient.msg("§eADR: $done uploaded - that's the hourly limit. Use Upload Missing Runs again later for the other ${missing.size - done}.")
                             return@start
                         }
+                        if (auto) { EngineerClient.logger.warn("[ec] adr catch-up: ${f.fileName}: $t"); continue }
                         EngineerClient.msg("§cADR: ${f.fileName} ${if (t is Refused) "refused (${t.message})" else "failed (${t.javaClass.simpleName})"}")
                     }
                 }
-                EngineerClient.msg("§aADR: done - $done of ${missing.size} uploaded.")
+                if (!auto) EngineerClient.msg("§aADR: done - $done of ${missing.size} uploaded.")
+                else if (done > 0) EngineerClient.msg("§7ADR: uploaded $done run${if (done == 1) "" else "s"} that didn't finish uploading last time.")
             } catch (t: Throwable) {
                 EngineerClient.logger.error("[ec] adr catch-up failed", t)
-                EngineerClient.msg("§cADR: couldn't check which runs are missing (${t.message ?: t.javaClass.simpleName}).")
+                if (!auto) EngineerClient.msg("§cADR: couldn't check which runs are missing (${t.message ?: t.javaClass.simpleName}).")
             } finally {
                 catchingUp = false
             }
         }
     }
+
+    private const val AUTO_DAYS = 3L
 
     /** A run's recorder and start time, from its first line; null for an empty or unreadable file. */
     private fun runKey(file: Path): String? = runCatching {

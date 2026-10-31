@@ -34,7 +34,7 @@ jobs:
         run: gh run download 37808382947 -R odtheking/OdinFabric -n Odin-0.3.7.jar -D libs/odin
       - name: Version
         run: |
-          echo "EC_VERSION=1.0.10" >> "$GITHUB_ENV"
+          echo "EC_VERSION=1.0.11" >> "$GITHUB_ENV"
           MC=$(grep -oP 'com\.mojang:minecraft:\K[^"]+' build.gradle.kts)
           echo "MC=$MC" >> "$GITHUB_ENV"
           echo "CHANNEL=$MC" >> "$GITHUB_ENV"
