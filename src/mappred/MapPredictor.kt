@@ -3,6 +3,7 @@ package com.engineerclient.mappred
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 /** A room's kind, from its colour on the map. */
@@ -494,14 +495,19 @@ class MapPredictor(private val view: MapView, gameProcess: Boolean = true) {
 
     /**
      * Every unnamed room's names from the secret total, however many there are, once the map is known for sure: every
-     * tile discovered, or [p] (this view's prediction) sure of every unknown room's size, place and type. Each room
-     * (its tiles) with each name that fits and its chance (from 0.1%), as [Prediction.namedRooms] has the last few; null
-     * while the map isn't known (or there's no total, a named room isn't on the list, or no names fit it: a misread).
+     * tile discovered, or [p] (this view's prediction) sure of every unknown room's size and place, and of its type
+     * except which dead end is which (puzzle, trap, yellow, rare: that moves no other room). Those dead ends' types are
+     * tried every way that keeps the floor's count of each, by their chances and how well the names then fit the total.
+     * Each room (its tiles) with each name that fits and its chance (from 0.1%), as [Prediction.namedRooms] has the last
+     * few; null while the map isn't known (or there's no total, a named room isn't on the list, or no names fit it: a
+     * misread).
      */
     fun certainNames(p: Prediction?): List<NamedRoom>? {
         val sn = secrets ?: return null
         if (bad || n > 64) return null
         val rooms = ArrayList<IntArray>(); val pools = ArrayList<Int>()
+        // dead ends sure to be one but not which kind: their place in rooms (pools gets a stand-in) and each kind's chance
+        val open = ArrayList<Int>(); val openChances = ArrayList<FloatArray>()
         for (i in view.kinds.indices) if (view.names[i] == null && fixedName(view.kinds[i]) == null) { rooms += view.roomTiles[i]; pools += poolOfKnown(i) }
         if (cells.isNotEmpty()) {
             val raw = (p ?: return null).raw
@@ -519,16 +525,48 @@ class MapPredictor(private val view: MapView, gameProcess: Boolean = true) {
                     continue
                 }
                 val c = (0 until Cls.COUNT).maxBy { q[it] }
-                if (c == Cls.BIG || q[c] < CERTAIN) return null
-                rooms += intArrayOf(t); pools += poolOfCls(c, Shape.ONE)
+                if (c != Cls.BIG && q[c] >= CERTAIN) { rooms += intArrayOf(t); pools += poolOfCls(c, Shape.ONE); continue }
+                if (DEAD_ENDS.sumOf { q[it].toDouble() } < CERTAIN) return null
+                open += rooms.size; openChances += FloatArray(Cls.COUNT) { if (it in DEAD_ENDS) q[it] / room else 0f }
+                rooms += intArrayOf(t); pools += -1
             }
         }
         if (rooms.isEmpty()) return null
-        val res = sn.solve(pools.toIntArray()) ?: return null
-        if (!(res.likelihood > 0)) return null
+        // each way to type the open dead ends: as many of each kind as their chances add up to (a floor's count of
+        // each is fixed), weighted by those chances
+        val want = IntArray(Cls.COUNT) { c -> openChances.sumOf { it[c].toDouble() }.roundToInt() }
+        val options = openChances.map { ch -> DEAD_ENDS.filter { ch[it] >= 0.001f } }
+        if (options.fold(1.0) { a, o -> a * o.size } > MAX_TYPINGS) return null
+        val chance = HashMap<Long, Double>()  // room * 256 + name index -> weight
+        var total = 0.0
+        val pick = IntArray(open.size)
+        val counts = IntArray(Cls.COUNT)
+        fun typing(j: Int, prior: Double) {
+            if (j == open.size) {
+                if ((0 until Cls.COUNT).any { counts[it] != want[it] }) return
+                val ps = pools.toIntArray()
+                for ((k, r) in open.withIndex()) ps[r] = poolOfCls(pick[k], Shape.ONE)
+                val res = sn.solve(ps) ?: return
+                val wgt = prior * res.likelihood
+                if (!(wgt > 0)) return
+                total += wgt
+                for (r in rooms.indices) res.byPool[ps[r]]?.forEachIndexed { k, share ->
+                    if (share > 0) chance.merge(r * 256L + MapStats.NAMES.indexOf(sn.avail[ps[r]][k]), wgt * share, Double::plus)
+                }
+                return
+            }
+            for (c in options[j]) {
+                pick[j] = c; counts[c]++
+                typing(j + 1, prior * openChances[j][c])
+                counts[c]--
+            }
+        }
+        typing(0, 1.0)
+        if (!(total > 0)) return null
         val out = ArrayList<NamedRoom>()
-        rooms.forEachIndexed { r, tiles ->
-            res.byPool[pools[r]]?.forEachIndexed { k, share -> if (share >= 0.001) out += NamedRoom(tiles, sn.avail[pools[r]][k], share.toFloat()) }
+        for ((key, wgt) in chance) {
+            val share = wgt / total
+            if (share >= 0.001) out += NamedRoom(rooms[(key / 256).toInt()], MapStats.NAMES[(key % 256).toInt()], share.toFloat())
         }
         return out
     }
@@ -920,6 +958,34 @@ class MapPredictor(private val view: MapView, gameProcess: Boolean = true) {
     companion object {
         /** Sure, for [certainNames]: every sample agrees (allowing for float sums). */
         const val CERTAIN = 0.999f
+
+        /** The kinds a 1x1 dead end can be that place no other room: [certainNames] tries each way they can be typed. */
+        private val DEAD_ENDS = intArrayOf(Cls.PUZZLE, Cls.TRAP, Cls.YELLOW, Cls.RARE)
+
+        /** At most this many ways to type the open dead ends are tried (more: the map isn't known well enough yet). */
+        private const val MAX_TYPINGS = 4096.0
+
+        /**
+         * The unknown rooms [p] is sure of the size and place of, whatever their type or name: each big room put on the
+         * same tiles in at least [at] of samples, and each tile a 1x1 room at least [at] of the time, by the chances shown
+         * ([Prediction.probs]) or as the samples gave them ([Prediction.raw]). Its tiles, each.
+         */
+        fun certainShapes(p: Prediction, at: Float = CERTAIN): List<IntArray> {
+            fun sureBig(t: Int) = maxOf(p.probs.getOrNull(t)?.get(Cls.BIG) ?: 0f, p.raw.getOrNull(t)?.get(Cls.BIG) ?: 0f) >= at
+            fun sure1x1(q: FloatArray?) = q != null && q.sum() >= at && q[Cls.BIG] <= 1 - at
+            val out = ArrayList<IntArray>()
+            val inBig = HashSet<Int>()
+            for (b in p.bigRooms) {
+                if (b.chance < at || b.tiles.any { it in inBig || !sureBig(it) }) continue
+                inBig += b.tiles.toList()
+                out += b.tiles
+            }
+            for (t in p.raw.indices) {
+                if (t in inBig) continue
+                if (sure1x1(p.probs.getOrNull(t)) || sure1x1(p.raw[t])) out += intArrayOf(t)
+            }
+            return out
+        }
 
         /**
          * A tile's chances [p] through a calibration [cal] (per [Cls] the sharpness a, offset b and change d per 3 rooms

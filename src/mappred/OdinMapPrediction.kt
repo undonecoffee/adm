@@ -5,6 +5,7 @@ import com.engineerclient.lcm.LcmStyle
 import com.odtheking.odin.OdinMod.mc
 import com.odtheking.odin.clickgui.settings.RenderableSetting.Companion.withDependency
 import com.odtheking.odin.clickgui.settings.impl.BooleanSetting
+import com.odtheking.odin.clickgui.settings.impl.ColorSetting
 import com.odtheking.odin.clickgui.settings.impl.DropdownSetting
 import com.odtheking.odin.clickgui.settings.impl.NumberSetting
 import com.odtheking.odin.clickgui.settings.impl.SelectorSetting
@@ -100,6 +101,37 @@ object OdinMapPrediction {
     private val exactRooms = BooleanSetting("Exact Last Rooms", true,
         desc = "Once the secrets the tab list counts leave only one way for the last rooms to be (their size, place and name: every room name comes up once a map), they're drawn in full with their name and secrets.").withDependency { on }
 
+    private val colorsDropdown = DropdownSetting("Prediction Colors",
+        desc = "The colours predicted rooms are drawn in. Off, they follow the map's own room colours (Odin's, or LCM Colors in LCM Style), darkened.").withDependency { on }
+    private val customColors = BooleanSetting("Custom Prediction Colors", false,
+        desc = "Draws predicted rooms in the colours below instead of the map's room colours, in Odin's look and LCM Style alike.").withDependency { on && colorsDropdown.value }
+    // dtMap's room colours darkened as it darkens a guess, and the grey of a sure big or 1x1 room, to begin with
+    private val predPuzzle = predColor("Puzzle", LcmStyle.darker(0xFF750085.toInt()), "a predicted puzzle room")
+    private val predTrap = predColor("Trap", LcmStyle.darker(0xFFD87F33.toInt()), "a predicted trap room")
+    private val predYellow = predColor("Yellow", LcmStyle.darker(0xFFFEDF00.toInt()), "a predicted yellow (miniboss) room")
+    private val predRare = predColor("Rare", LcmStyle.darker(0xFFFFCB59.toInt()), "a predicted rare room")
+    private val predBlood = predColor("Blood", LcmStyle.darker(0xFFFF0000.toInt()), "a predicted blood room")
+    private val predFairy = predColor("Fairy", LcmStyle.darker(0xFFF4138B.toInt()), "a predicted fairy room")
+    private val predRoom = predColor("Room", 0xFF555555.toInt(), "a big or 1x1 room the prediction is sure of")
+
+    private fun predColor(type: String, default: Int, what: String) =
+        ColorSetting("Predicted $type", Color(default), true, desc = "Custom Prediction Colors' colour for $what.")
+            .withDependency { on && colorsDropdown.value && customColors.value }
+
+    /** A predicted type's colour from Prediction Colors, or null to use the map's room colours. */
+    private fun custom(c: Int): Int? {
+        if (!customColors.value) return null
+        return when (c) {
+            Cls.PUZZLE -> predPuzzle
+            Cls.TRAP -> predTrap
+            Cls.YELLOW -> predYellow
+            Cls.RARE -> predRare
+            Cls.BLOOD -> predBlood
+            Cls.FAIRY -> predFairy
+            else -> return null
+        }.value.rgba
+    }
+
     private val question = Identifier.fromNamespaceAndPath("odin", "map/question.png")
 
     @Volatile private var shown: Prediction? = null
@@ -120,12 +152,16 @@ object OdinMapPrediction {
     private const val ROOM = 16
     /** From this sure (percent) a dead end always gets Odin's guess tile, whatever Dead End Chance is. */
     private const val ALWAYS_DEAD_END = 95
-    /** An exact last room: every sample agrees (allowing for float sums). */
-    private const val EXACT = 0.999f
+    /**
+     * Shown as 100% (the chances are drawn rounded): from here anything predicted is drawn as an exact room, and a name
+     * as the room's name.
+     */
+    private const val SURE = 0.995f
     private val BIG_GREY = Color(85, 85, 85, 1f)
 
     fun install() {
-        for (s in listOf(mode, threadsSetting, aheadSetting, splitText, splitSecrets, chances, minChance, deadEndDropdown, deadEndChance, bloodFairyDropdown, bloodFairyChance, bigDropdown, bigChance, oneDropdown, oneChance, doorDropdown, doorChance, exactRooms)) DungeonMap.registerSetting(s)
+        for (s in listOf(mode, threadsSetting, aheadSetting, splitText, splitSecrets, chances, minChance, deadEndDropdown, deadEndChance, bloodFairyDropdown, bloodFairyChance, bigDropdown, bigChance, oneDropdown, oneChance, doorDropdown, doorChance, exactRooms,
+            colorsDropdown, customColors, predPuzzle, predTrap, predYellow, predRare, predBlood, predFairy, predRoom)) DungeonMap.registerSetting(s)
         on<TickEvent.End> { if (mc.player != null && (mc.level?.gameTime ?: 0L) % 5L == 0L) EngineerClient.safely("map prediction") { update() } }
         on<LevelEvent.Load> { reset() }
         EventBus.subscribe(this)
@@ -331,7 +367,7 @@ object OdinMapPrediction {
     }
 
     /** A type's colour on a guess: Odin's darkened by half, or LCM Style's darkened as dtMap does. */
-    private fun dim(c: Int): Int = if (lcm) LcmStyle.darker(lcmColor(c)) else colorOf(c).darker(0.5f).rgba
+    private fun dim(c: Int): Int = custom(c) ?: if (lcm) LcmStyle.darker(lcmColor(c)) else colorOf(c).darker(0.5f).rgba
 
     private val SPECIALS = intArrayOf(Cls.PUZZLE, Cls.TRAP, Cls.YELLOW, Cls.BLOOD, Cls.FAIRY, Cls.RARE)
 
@@ -368,11 +404,24 @@ object OdinMapPrediction {
         // (every room, discovered ones nobody has opened too, once the map is known for sure)
         if (exactRooms.value) for ((_, names) in (shownNames ?: p.namedRooms).groupBy { it.tiles.joinToString(",") }) {
             val tiles = names[0].tiles
-            if (names.sumOf { it.chance.toDouble() } < EXACT) continue
+            if (names.sumOf { it.chance.toDouble() } < SURE) continue
             if (tiles.all { known[it] }) { if (!namedOnMap(tiles[0])) roomText(g, tiles, names); continue }
             if (tiles.any { known[it] || exact[it] || it in blood }) continue
             for (t in tiles) exact[t] = true
             exactRoom(g, tiles, names)
+        }
+        // anything shown at 100% (a room's size and place), named or not: drawn in full in its type's colour (or the
+        // kinds a dead end can still be), keeping the split's label on its door's tile
+        if (exactRooms.value) for (tiles in MapPredictor.certainShapes(p, SURE)) {
+            if (tiles.any { known[it] || exact[it] || it in blood }) continue
+            for (t in tiles) exact[t] = true
+            val q = p.probs[tiles[0]] ?: p.raw[tiles[0]]
+            val types = if (tiles.size > 1 || q == null) listOf(-1) else {
+                val room = q.sum()
+                (0 until Cls.COUNT).filter { q[it] >= 0.05f * room }.sortedByDescending { q[it] }.take(3).map { if (it == Cls.NORMAL || it == Cls.BIG) -1 else it }.distinct()
+            }
+            exactFill(g, tiles, types)
+            for (t in tiles) splits[t]?.let { overlay(g, (t % W) * TILE, (t / W) * TILE, it, null, false) }
         }
         // the big rooms it's sure of, greyed out at their whole size (likeliest first, never two on one tile)
         val inBig = arrayOfNulls<BigRoom>(W * W)
@@ -471,19 +520,43 @@ object OdinMapPrediction {
      * the secrets if every name that fits has the same count.
      */
     private fun exactRoom(g: GuiGraphicsExtractor, tiles: IntArray, names: List<NamedRoom>) {
-        val best = names.maxBy { it.chance }
-        val type = when (best.name.pool) {
-            MapStats.POOL_PUZZLE -> Cls.PUZZLE
-            MapStats.POOL_TRAP -> Cls.TRAP
-            MapStats.POOL_YELLOW -> Cls.YELLOW
-            MapStats.POOL_BLOOD -> Cls.BLOOD
-            MapStats.POOL_FAIRY -> Cls.FAIRY
-            else -> -1
-        }
-        val color = if (lcm) (if (type < 0) LcmStyle.NORMAL else lcmColor(type)) and 0xFFFFFF or (0xBF shl 24)
-            else Color((if (type < 0) DungeonMap.normalRoomColor else colorOf(type)).rgba, 0.75f).rgba
-        fillTiles(g, tiles, color)
+        // a dead end that can still be more than one kind (its names from more than one pool) shows each kind it can be
+        val byType = names.groupBy { typeOfPool(it.name.pool) }.mapValues { (_, n) -> n.sumOf { it.chance.toDouble() } }
+        val types = byType.filter { it.value >= 0.05 }.entries.sortedByDescending { it.value }.take(3).map { it.key }
+        exactFill(g, tiles, types.ifEmpty { listOf(typeOfPool(names.maxBy { it.chance }.name.pool)) })
         roomText(g, tiles, names)
+    }
+
+    private fun typeOfPool(pool: Int): Int = when (pool) {
+        MapStats.POOL_PUZZLE -> Cls.PUZZLE
+        MapStats.POOL_TRAP -> Cls.TRAP
+        MapStats.POOL_YELLOW -> Cls.YELLOW
+        MapStats.POOL_BLOOD -> Cls.BLOOD
+        MapStats.POOL_FAIRY -> Cls.FAIRY
+        MapStats.POOL_RARE -> Cls.RARE
+        else -> -1
+    }
+
+    /** An exact room's colour for a type (-1: a normal room), a little see-through as nobody has opened it. */
+    private fun exactColor(type: Int): Int =
+        if (lcm) (if (type < 0) LcmStyle.NORMAL else lcmColor(type)) and 0xFFFFFF or (0xBF shl 24)
+        else Color((if (type < 0) DungeonMap.normalRoomColor else colorOf(type)).rgba, 0.75f).rgba
+
+    /**
+     * An exact room's shape in its type's colour; a 1x1 that can still be more than one kind (likeliest first) as a
+     * guess tile in their colours: dtMap's in LCM Style, else side by side as Odin's.
+     */
+    private fun exactFill(g: GuiGraphicsExtractor, tiles: IntArray, types: List<Int>) {
+        if (types.size <= 1 || tiles.size > 1) { fillTiles(g, tiles, exactColor(types.firstOrNull() ?: -1)); return }
+        val x = (tiles[0] % W) * TILE; val y = (tiles[0] / W) * TILE
+        if (lcm) {
+            // dtMap's order: puzzle on the outside, trap, yellow in the middle
+            val order = listOf(Cls.PUZZLE, Cls.TRAP, Cls.YELLOW, Cls.RARE, Cls.BLOOD, Cls.FAIRY, -1)
+            LcmStyle.guessTile(g, x, y, types.sortedBy { order.indexOf(it) }.map { exactColor(it) }.toIntArray())
+            return
+        }
+        val part = ROOM / types.size
+        types.forEachIndexed { i, c -> g.fill(x + i * part, y, if (i == types.lastIndex) x + ROOM else x + (i + 1) * part, y + ROOM, exactColor(c)) }
     }
 
     /** The map names the room on tile [t] itself (it's open: [LcmStyle.knownName]). */
@@ -496,7 +569,7 @@ object OdinMapPrediction {
         val cx = tiles.map { (it % W) * TILE + ROOM / 2f }.average().toFloat()
         val cz = tiles.map { (it / W) * TILE + ROOM / 2f }.average().toFloat()
         val secrets = names.map { it.name.secrets }.distinct().singleOrNull()
-        val name = if (best.chance >= EXACT) best.name.name else if (lcm || tiles.all { knownTile(it) }) "" else "?"
+        val name = if (best.chance >= SURE) best.name.name else if (lcm || tiles.all { knownTile(it) }) "" else "?"
         val text = name + if (secrets != null && secrets > 0) " 0/$secrets" else ""
         val lines = text.trim().split(" ").filter { it.isNotEmpty() }
         val fontH = mc.font.lineHeight
@@ -511,8 +584,9 @@ object OdinMapPrediction {
         }
     }
 
-    /** A room's tiles and the gaps between them, as Odin draws a room (fillRoom), in grey. */
-    private fun greyRoom(g: GuiGraphicsExtractor, tiles: IntArray) = fillTiles(g, tiles, BIG_GREY.rgba)
+    /** A room's tiles and the gaps between them, as Odin draws a room (fillRoom), in grey (or Predicted Room). */
+    private fun greyRoom(g: GuiGraphicsExtractor, tiles: IntArray) =
+        fillTiles(g, tiles, if (customColors.value) predRoom.value.rgba else BIG_GREY.rgba)
 
     private fun fillTiles(g: GuiGraphicsExtractor, tiles: IntArray, c: Int) {
         val set = tiles.toHashSet()
@@ -538,6 +612,13 @@ object OdinMapPrediction {
         if (lcm) {
             // dtMap's order: puzzle on the outside, trap, yellow in the middle
             LcmStyle.guessTile(g, x, y, intArrayOf(Cls.PUZZLE, Cls.TRAP, Cls.YELLOW, Cls.RARE).filter { it in keep }.map { dim(it) }.toIntArray())
+            return
+        }
+        if (customColors.value) {
+            // Odin's layout in the chosen colours, as chosen (not darkened again)
+            val custom = types.filter { it in keep }.map { dim(it) }
+            val part = ROOM / custom.size.coerceAtLeast(1)
+            custom.forEachIndexed { i, c -> g.fill(x + i * part, y, if (i == custom.lastIndex) x + ROOM else x + (i + 1) * part, y + ROOM, c) }
             return
         }
         val colors = types.filter { it in keep }.map { colorOf(it) }
