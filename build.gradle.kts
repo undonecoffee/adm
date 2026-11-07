@@ -52,14 +52,9 @@ dependencies {
     implementation("org.tukaani:xz:1.10")
     "include"("org.tukaani:xz:1.10")
 
-    // Odin is a required runtime mod (declared in fabric.mod.json). 0.3.7 for 26.3 is not released
-    // yet: compiled against the 26.3 port build (OdinFabric PR #164, CI run 37808382947), which the
-    // release workflow downloads into libs/odin; kept out of git.
+    // Odin is a required runtime mod (declared in fabric.mod.json, >=0.4.0). Compiled against the
+    // Odin 0.4.0 release jar unpacked into libs/odin, which the release workflow downloads; kept out of git.
     compileOnly(files("libs/odin"))
-
-    // Sodium replaces the terrain renderer on every team client. Since 26.2 it culls from inside the
-    // level extract, so the POV previews no longer call it; optional at runtime.
-    compileOnly("maven.modrinth:sodium:bAZQdGpg")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
@@ -85,9 +80,27 @@ tasks {
     test {
         useJUnitPlatform()
         // Test classes run in parallel JVMs (one class at a time in each: the pack tests share global state, so not threads in one JVM).
-        // A serial run was 30 s of test time; the box is shared, so the forks are few and their heaps capped.
-        maxParallelForks = (Runtime.getRuntime().availableProcessors() / 4).coerceIn(1, 6)
-        maxHeapSize = "1g"
+        // A serial run was 30 s of test time; the box is shared, so the forks are few and their heaps capped. CI's runner has
+        // nothing else on it (4 cores, 16 GB): a fork per core, where a quarter of them was one fork and 95 s of tests.
+        val cores = Runtime.getRuntime().availableProcessors()
+        val ci = System.getenv("CI") != null
+        maxParallelForks = if (ci) cores else (cores / 4).coerceIn(1, 6)
+        maxHeapSize = if (ci) "3g" else "1g"
+        // On CI the classes marked @Execution(CONCURRENT) (the map prediction ones: 84 of the 86 s, each test its own session)
+        // also run their tests side by side, so the longest class isn't the whole wait. Everything else stays one at a time.
+        if (ci) systemProperty("junit.jupiter.execution.parallel.enabled", "true")
+        // Each class over 2 s in the log, with the cores seen: where the test job's time goes.
+        val forks = maxParallelForks
+        doFirst { logger.lifecycle("tests: $cores cores, $forks forks") }
+        addTestListener(object : org.gradle.api.tasks.testing.TestListener {
+            override fun beforeSuite(suite: org.gradle.api.tasks.testing.TestDescriptor) {}
+            override fun beforeTest(test: org.gradle.api.tasks.testing.TestDescriptor) {}
+            override fun afterTest(test: org.gradle.api.tasks.testing.TestDescriptor, result: org.gradle.api.tasks.testing.TestResult) {}
+            override fun afterSuite(suite: org.gradle.api.tasks.testing.TestDescriptor, result: org.gradle.api.tasks.testing.TestResult) {
+                val ms = result.endTime - result.startTime
+                if (suite.className != null && ms >= 2000) logger.lifecycle("  %.1f s  %s".format(ms / 1000.0, suite.className))
+            }
+        })
         // The optional pack checks (SamplePackTest, RealPackTest) read these folders; without them as inputs a green run would be
         // reused from the cache when only the packs or the variable changed. Both are skipped when the variable is not set.
         for (name in listOf("ADS_SAMPLE_PACKS", "ADS_REAL_PACKS", "ADS_BLOOD_FIGHTS")) {

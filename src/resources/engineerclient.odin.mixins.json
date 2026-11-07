@@ -9,7 +9,6 @@
     "HudElementMixin",
     "InvincibilityHudMixin",
     "InvincibilityPhoenixMixin",
-    "LeapMenuRenderMixin",
     "OdinTermTimesMixin",
     "PanelOrderMixin",
     "PanelOnScreenMixin",
@@ -20,12 +19,15 @@
     "SimonSaysTicksMixin",
     "TickTimersGoldorMixin",
     "HighlightRenderMixin",
-    "TermGuiButtonMixin",
     "LcmStyleMixin",
     "LcmMapInfoMixin",
+    "PaulScoreMixin",
     "MapPathHintsMixin",
+    "MapIconsMixin",
+    "MapSizeMixin",
     "TpMazeRenderMixin",
-    "TerminalClickLimitMixin"
+    "TerminalClickLimitMixin",
+    "NumberSettingNoneMixin"
   ],
   "injectors": {
     "defaultRequire": 0

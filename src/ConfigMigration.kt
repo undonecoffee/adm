@@ -68,6 +68,7 @@ object ConfigMigration {
      *  - Timers' Necron Drop HUD is its Necron DPS (where it was, on or off as it was).
      *  - ADS's Shortbow Cooldown is its Shortbow Shot Cooldown (the wrong default 2 dropped, so it reads 5).
      *  - ADR's Private Runs is its Unlisted Runs (2026-10-30, ADM 1.0.10).
+     *  - Engineer Client's Terminals Status goes (2026-11-06).
      * Each only happens while its target is still missing, so it runs once. [odinDir] is
      * config/odin. True if the file was rewritten.
      */
@@ -305,6 +306,10 @@ object ConfigMigration {
                 changed = true
             }
         }
+
+        // Engineer Client's Terminals Status is gone (2026-11-06; Odin's own, in odin-config.json, is another module).
+        val gone = module(modules, "Terminals Status")
+        if (gone != null) { modules.remove(gone); changed = true }
 
         if (changed) {
             Files.createDirectories(file.parent)

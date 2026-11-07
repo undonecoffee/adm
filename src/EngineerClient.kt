@@ -5,7 +5,7 @@ import com.engineerclient.misc.AgroSphere
 import com.engineerclient.misc.RandomStuff
 import com.engineerclient.rotation.EcLog
 import com.engineerclient.practice.SimonSaysPractice
-import com.engineerclient.pov.PovPreviews
+import com.engineerclient.pov.PosePov
 
 import com.engineerclient.splits.DungeonSplits
 import com.engineerclient.splits.OdinSplitsLook
@@ -78,7 +78,7 @@ object EngineerClient : ClientModInitializer {
      */
     val MODULES: List<com.odtheking.odin.features.Module> by lazy {
         listOf(
-            PovPreviews, com.engineerclient.p3sim.P3Sim, ADR, SimonSaysPractice, BrWaypoints2, AgroSphere, DungeonSplits, com.engineerclient.practice.Recore,
+            PosePov, com.engineerclient.party.TermProgress, com.engineerclient.p3sim.P3Sim, ADR, SimonSaysPractice, BrWaypoints2, AgroSphere, DungeonSplits, com.engineerclient.practice.Recore,
             com.engineerclient.clearbreakdown.ClearBreakdown,
             RandomStuff, com.engineerclient.misc.HealthMana, com.engineerclient.misc.Timers, com.engineerclient.misc.LcmMeleeWarning,
             com.engineerclient.practice.TerminalHitboxes,
@@ -112,7 +112,10 @@ object EngineerClient : ClientModInitializer {
         // (reading never writes the file).
         safely("lcm style") { com.engineerclient.lcm.LcmStyle.install() }
         safely("lcm map info") { com.engineerclient.lcm.LcmMapInfo.install() }
+        safely("paul score") { com.engineerclient.lcm.PaulScore.install() }
         safely("map prediction") { com.engineerclient.mappred.OdinMapPrediction.install() }
+        safely("map icons") { com.engineerclient.mapicons.MapIcons.install() }
+        safely("map sizes") { com.engineerclient.mapicons.MapSizes.install() }
         // Team TP Maze: settings on Odin's Puzzle Solvers (its TP Maze), the party's shared maze map over Odin's websocket.
         safely("team tp maze") { com.engineerclient.tpmaze.TeamTpMaze.install() }
         safely("map configs") { ModuleManager.loadConfigurations() }
