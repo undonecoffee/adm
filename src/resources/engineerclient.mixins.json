@@ -56,7 +56,11 @@
     "AdsEngineLeaveScreenMixin",
     "ServerTeleportAccessor",
     "PosePovRenderMixin",
-    "PosePovUnderGuiMixin"
+    "PosePovUnderGuiMixin",
+    "FirstPersonDropAnimationMixin",
+    "DropAnimationAttackMixin",
+    "ZpewCameraMixin",
+    "ZpewTeleportMixin"
   ],
   "injectors": {
     "defaultRequire": 1

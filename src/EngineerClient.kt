@@ -78,10 +78,11 @@ object EngineerClient : ClientModInitializer {
      */
     val MODULES: List<com.odtheking.odin.features.Module> by lazy {
         listOf(
-            PosePov, com.engineerclient.party.TermProgress, com.engineerclient.p3sim.P3Sim, ADR, SimonSaysPractice, BrWaypoints2, AgroSphere, DungeonSplits, com.engineerclient.practice.Recore,
+            PosePov, com.engineerclient.party.TermProgress, com.engineerclient.p3sim.P3Sim, ADR, SimonSaysPractice, BrWaypoints2, AgroSphere, DungeonSplits, com.engineerclient.practice.Recore, com.engineerclient.practice.EeHighlight,
             com.engineerclient.clearbreakdown.ClearBreakdown,
             RandomStuff, com.engineerclient.misc.HealthMana, com.engineerclient.misc.Timers, com.engineerclient.misc.LcmMeleeWarning,
             com.engineerclient.practice.TerminalHitboxes,
+            com.engineerclient.misc.ItemHighlight, com.engineerclient.misc.Zpew, com.engineerclient.misc.PuzzleOverlay,
         )
     }
 
@@ -95,12 +96,14 @@ object EngineerClient : ClientModInitializer {
         // ("Engineer Client"), own config file (config/odin/addons/adm.json), own event
         // subscription lifecycle. This is Odin's documented addon path.
         ModuleManager.registerModules(ModuleConfig("adm.json"), *MODULES.toTypedArray())
+        safely("subscribe enabled") { subscribeEnabled(MODULES) }
 
         // Additions to Odin's own modules (e.g. the Engineer Splits look on Odin's Splits) go in
         // before anything saves the configs, which would drop saved values for settings that don't
         // exist yet.
         safely("ss solver") { com.engineerclient.practice.OdinSimonSays.install() }
         safely("masks used") { com.engineerclient.misc.OdinMasksUsed.install() }
+        safely("chat melody") { com.engineerclient.misc.OdinMelodyChat.install() }
         safely("tick timers") { com.engineerclient.misc.OdinTickTimers.install() }
         safely("highlight look") { com.engineerclient.misc.OdinHighlightLook.install() }
         safely("splits look") { OdinSplitsLook.install() }
@@ -118,11 +121,13 @@ object EngineerClient : ClientModInitializer {
         safely("map sizes") { com.engineerclient.mapicons.MapSizes.install() }
         // Team TP Maze: settings on Odin's Puzzle Solvers (its TP Maze), the party's shared maze map over Odin's websocket.
         safely("team tp maze") { com.engineerclient.tpmaze.TeamTpMaze.install() }
+        safely("water board") { com.engineerclient.waterboard.WaterBoardSolver.install() }
         safely("map configs") { ModuleManager.loadConfigurations() }
         safely("hover terms") { com.engineerclient.practice.TermsimExtras.install() }
         safely("click limit") { com.engineerclient.misc.OdinClickLimit.install() }
         safely("odin term times") { com.engineerclient.practice.OdinTermTimes.install() }
         runCatching { com.engineerclient.misc.LaunchStats.install() }
+        runCatching { com.engineerclient.misc.UpdateCheck.install() }
         safely("leap order") { com.engineerclient.misc.LeapOrder.install() }
         safely("p3sim") { com.engineerclient.p3sim.P3Sim.init() }
 
@@ -163,6 +168,20 @@ object EngineerClient : ClientModInitializer {
         registerCommand()
 
         logger.info("[ec] initialized — class stash=${EcConfig.data.lastKnownClass}")
+    }
+
+    /**
+     * Subscribes those of [modules] that are on to Odin's event bus. Odin subscribes a module only when it's toggled on
+     * (onEnable) or always active: one made with `toggled = true` starts on but unsubscribed, and a config load toggles
+     * only a module whose saved state differs, so with "enabled" saved it stays that way for good. On in the ClickGUI,
+     * yet every `on<...>` / `onReceive<...>` of its is never called until it's turned off and on again (Terminal Hitboxes'
+     * boxes, EE Highlight's Show Spots, Term Progress's labels; 2026-11-07, Odin 0.4.0). Call right after
+     * registerModules: a later config load that turns one off then unsubscribes it as usual. Subscribing twice is nothing.
+     */
+    fun subscribeEnabled(modules: Iterable<com.odtheking.odin.features.Module>) {
+        val fixed = modules.filter { it.enabled && !it.alwaysActive && it !in EventBus.activeSubscribers }
+        for (m in fixed) EventBus.subscribe(m)
+        if (fixed.isNotEmpty()) logger.info("[ec] on but left off Odin's event bus, subscribed: ${fixed.joinToString { it.name }}")
     }
 
     /** Every handler that runs inside Odin's bus or a coroutine must not be able to take Odin down with it. */

@@ -36,7 +36,7 @@ jobs:
         run: gh release download 0.4.0 -R odtheking/Odin -p Odin-0.4.0.jar -D /tmp/odin && mkdir -p libs && unzip -q /tmp/odin/Odin-0.4.0.jar -d libs/odin
       - name: Version
         run: |
-          echo "EC_VERSION=1.0.13" >> "$GITHUB_ENV"
+          echo "EC_VERSION=1.0.14" >> "$GITHUB_ENV"
           MC=$(grep -oP 'com\.mojang:minecraft:\K[^"]+' build.gradle.kts)
           echo "MC=$MC" >> "$GITHUB_ENV"
           echo "CHANNEL=$MC" >> "$GITHUB_ENV"
@@ -65,11 +65,13 @@ jobs:
           cp build/libs/*.jar "$jar"
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/release-$CHANNEL/$jar"
           notes="$(printf '**[Download ADM for Minecraft %s](%s)** · %s\n\nPut the jar in your `mods` folder. Needs Fabric, Fabric API, Fabric Language Kotlin and Odin.' "$MC" "$url" "$EC_VERSION")"
-          gh release create "release-$CHANNEL" "$jar" --target "$GITHUB_SHA" \
+          # ADM's update.json (promote.sh) goes beside the jar, for UpdateCheck.
+          extra=; [ -f update.json ] && extra=update.json
+          gh release create "release-$CHANNEL" "$jar" $extra --target "$GITHUB_SHA" \
             --title "ADM for Minecraft $MC" \
             --notes "$notes" $latest
 
-  # The headless tests, alongside the release rather than before it: a failure shows on the commit.
+  # The few headless tests (test/), alongside the release rather than before it: a failure shows on the commit.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -87,17 +89,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release download 0.4.0 -R odtheking/Odin -p Odin-0.4.0.jar -D /tmp/odin && mkdir -p libs && unzip -q /tmp/odin/Odin-0.4.0.jar -d libs/odin
-      # Its own compiler state, as the release job's (above), so it doesn't compile everything cold first (a minute); the
-      # first run starts from the release job's.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            .gradle
-            build/kotlin
-            build/classes
-            build/tmp
-          key: ec-test-compile-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            ec-test-compile-${{ github.ref_name }}-
-            ec-compile-${{ github.ref_name }}-
       - run: gradle test --console=plain -Dorg.gradle.jvmargs=-Xmx6G -Pkotlin.daemon.jvmargs=-Xmx6G

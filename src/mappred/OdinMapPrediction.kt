@@ -21,10 +21,8 @@ import com.odtheking.odin.utils.Color
 import com.odtheking.odin.utils.Color.Companion.darker
 import com.odtheking.odin.utils.skyblock.dungeon.DungeonUtils
 import net.minecraft.client.gui.GuiGraphicsExtractor
-import net.minecraft.client.multiplayer.PlayerInfo
 import net.minecraft.client.renderer.RenderPipelines
 import net.minecraft.resources.Identifier
-import net.minecraft.world.level.GameType
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
@@ -101,6 +99,8 @@ object OdinMapPrediction {
         desc = "How sure the prediction has to be of a door before it's drawn.").withDependency { on && doorDropdown.value }
     private val exactRooms = BooleanSetting("Exact Last Rooms", true,
         desc = "Once the secrets the tab list counts leave only one way for the last rooms to be (their size, place and name: every room name comes up once a map), they're drawn in full with their name and secrets.").withDependency { on }
+    private val exactOpacity = NumberSetting("Exact Last Rooms Opacity", 75, 0..100, 1, unit = "%",
+        desc = "How solid the rooms Exact Last Rooms draws are (their names and secrets stay fully visible).").withDependency { on && exactRooms.value }
 
     private val colorsDropdown = DropdownSetting("Prediction Colors",
         desc = "The colours predicted rooms are drawn in. Off, they follow the map's own room colours (Odin's, or LCM Colors in LCM Style), darkened.").withDependency { on }
@@ -164,7 +164,7 @@ object OdinMapPrediction {
     private val BIG_GREY = Color(85, 85, 85, 1f)
 
     fun install() {
-        for (s in listOf(mode, threadsSetting, aheadSetting, splitText, splitSecrets, chances, minChance, deadEndDropdown, deadEndChance, bloodFairyDropdown, bloodFairyChance, bigDropdown, bigChance, oneDropdown, oneChance, doorDropdown, doorChance, exactRooms,
+        for (s in listOf(mode, threadsSetting, aheadSetting, splitText, splitSecrets, chances, minChance, deadEndDropdown, deadEndChance, bloodFairyDropdown, bloodFairyChance, bigDropdown, bigChance, oneDropdown, oneChance, doorDropdown, doorChance, exactRooms, exactOpacity,
             colorsDropdown, customColors, predPuzzle, predTrap, predYellow, predRare, predBlood, predFairy, predRoom)) DungeonMap.registerSetting(s)
         on<TickEvent.End> { if (mc.player != null && (mc.level?.gameTime ?: 0L) % 5L == 0L) EngineerClient.safely("map prediction") { update() } }
         on<LevelEvent.Load> { reset() }
@@ -228,26 +228,8 @@ object OdinMapPrediction {
 
     private fun pair(a: Int, b: Int) = minOf(a, b) * 64 + maxOf(a, b)
 
-    /**
-     * The tab list's puzzle lines in the order it draws them (each a name, null for "???"). Odin's own list
-     * keeps only the named ones, in the order it learned them, but where a line is says where its puzzle is.
-     */
-    private fun puzzleSlots(): List<String?> {
-        val infos = mc.connection?.listedOnlinePlayers ?: return emptyList()
-        return infos.sortedWith(TAB_ORDER).mapNotNull { info ->
-            val line = info.tabListDisplayName?.string ?: return@mapNotNull null
-            PUZZLE_LINE.find(line)?.groupValues?.get(1)
-        }.map { if (it == "???") null else it }
-    }
-
-    /** The tab list's own order (PlayerTabOverlay's): list order, spectators last, then team, then profile name. */
-    private val TAB_ORDER = compareByDescending<PlayerInfo> { it.tabListOrder }
-        .thenBy { it.gameMode == GameType.SPECTATOR }
-        .thenBy { it.team?.name ?: "" }
-        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.profile.name() }
-
-    /** " Ice Fill: [✦]" or " ???: [✦]", as Odin reads them. */
-    private val PUZZLE_LINE = Regex("^ (\\w+(?: \\w+)*|\\?\\?\\?): \\[([✖✔✦])] ?(?:\\((\\w+)\\))?$")
+    /** The tab list's puzzle lines in the order it draws them (each a name, null for "???"): TabPuzzles. */
+    private fun puzzleSlots(): List<String?> = com.engineerclient.misc.TabPuzzles.read().slots.map { it.name }
 
     private fun update() {
         if (!on || !DungeonMap.enabled || !supported()) {
@@ -571,10 +553,10 @@ object OdinMapPrediction {
         else -> -1
     }
 
-    /** An exact room's colour for a type (-1: a normal room), a little see-through as nobody has opened it. */
+    /** An exact room's colour for a type (-1: a normal room), as solid as Exact Last Rooms Opacity says. */
     private fun exactColor(type: Int): Int =
-        if (lcm) (if (type < 0) LcmStyle.NORMAL else lcmColor(type)) and 0xFFFFFF or (0xBF shl 24)
-        else Color((if (type < 0) DungeonMap.normalRoomColor else colorOf(type)).rgba, 0.75f).rgba
+        if (lcm) (if (type < 0) LcmStyle.NORMAL else lcmColor(type)) and 0xFFFFFF or (exactOpacity.value * 255 / 100 shl 24)
+        else Color((if (type < 0) DungeonMap.normalRoomColor else colorOf(type)).rgba, exactOpacity.value / 100f).rgba
 
     /**
      * An exact room's shape in its type's colour; a 1x1 that can still be more than one kind (likeliest first) as a
