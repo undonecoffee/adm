@@ -1,6 +1,6 @@
 {
-  "version": "1.0.14",
-  "note": "Legit Zpew, a new Water Board solver, EE Highlight and Puzzle Overlay",
+  "version": "1.0.15",
+  "note": "Legit Zpew, EE Highlight and Puzzle Overlay; the Water Board solver from 1.0.14 is taken out until it's finished (Odin's own solver works as before)",
   "hard": "",
   "now": ""
 }
