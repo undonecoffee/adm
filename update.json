@@ -1,6 +1,6 @@
 {
-  "version": "1.0.15",
-  "note": "Legit Zpew, EE Highlight and Puzzle Overlay; the Water Board solver from 1.0.14 is taken out until it's finished (Odin's own solver works as before)",
+  "version": "1.0.16",
+  "note": "Block Instaclear, a wither door in blood rush won't open until the room behind has its mobs, so it can't instaclear",
   "hard": "",
   "now": ""
 }
