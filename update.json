@@ -1,6 +1,6 @@
 {
-  "version": "1.0.16",
-  "note": "Block Instaclear, a wither door in blood rush won't open until the room behind has its mobs, so it can't instaclear",
+  "version": "1.0.17",
+  "note": "Legit Zpew, Odin's etherwarp overlay now follows the zpew camera",
   "hard": "",
   "now": ""
 }
